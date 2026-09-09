@@ -62,6 +62,23 @@ C4D_Scripts/
 
 脚本读取经过运动图形效果器计算后的 `MODATA_MATRIX`，并转换为世界矩阵，因此可跟随效果器处理后的最终位置、旋转和缩放结果。
 
+> 已知限制：普通 Python Tag 在手动拖动时间轴播放头（scrub）时可能出现 MoData / 表达式刷新顺序不稳定，导致目标对象短暂或持续回到自身动画结果。连续播放通常正常。该问题正在通过 XPresso 原生 MoGraph Data 节点方案规避。
+
+### `scripts/MoGraph_索引跟随_XPresso测试版.py`
+
+针对 `MoGraph_索引跟随.py` 在**手动拖动时间轴播放头**时的刷新问题制作的测试版本。
+
+主要区别：
+
+- Python 只负责一次性搭建 XPresso 图，不参与逐帧 MoData 求值。
+- 运行时使用 Cinema 4D 原生 **Motion Graphics Data** XPresso 节点读取指定索引的 **Global Matrix**。
+- Global Matrix 包含运动图形效果器计算后的结果。
+- 仍提供 **对象索引 / 被链接对象 / 过渡** 三个控制参数。
+- **0%** 使用被链接对象当前动画矩阵，**100%** 使用指定 MoGraph 元素的 Global Matrix。
+- 重点用于验证连续播放与手动 scrub 是否保持一致。
+
+当前测试版不会覆盖旧 Python Tag 版本；用户数据暂时创建在所选 MoGraph 对象自身，便于完全避开运行时 Python Tag 的求值时序问题。验证稳定后再决定是否替换为正式实现。
+
 ## 归档规则
 
 新增内容时，根据实际用途放入对应目录：
