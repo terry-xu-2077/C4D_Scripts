@@ -9,12 +9,13 @@ MoGraph 索引跟随
 3. 脚本会在所选对象上创建一个 Python Tag，并添加：
    - 对象索引：要读取的 MoData 元素索引（从 0 开始）
    - 被链接对象：接收世界变换的对象
-   - 过渡：0% 为被链接对象在首次链接时的初始世界变换，100% 为 MoGraph 元素的最终世界变换
+   - 过渡：0% 为被链接对象当前帧自身动画计算结果，100% 为 MoGraph 元素的最终世界变换
 
 说明：
 - 读取 MODATA_MATRIX，即经过 MoGraph 效果器计算后的矩阵。
 - 世界矩阵 = MoGraph 生成器世界矩阵 * MODATA_MATRIX[index]。
 - Python Tag 设置到 Generators 优先级较后阶段，以尽量读取最终 MoGraph 结果。
+- 被链接对象可以保留自己的动画；每一帧都会先缓存其自身动画结果，再与 MoGraph 结果混合。
 """
 
 import c4d
@@ -80,11 +81,15 @@ UD_TARGET = {target_id}
 UD_BLEND = {blend_id}
 
 # Python Tag 内部缓存。使用普通 BaseContainer ID，不显示在用户数据里。
+# 缓存“当前时间点下，被控对象自身动画计算完成后的世界矩阵”，避免同一帧
+# Python Tag 多次执行时，读取到自己上一轮 SetMg() 写回的结果而产生反馈漂移。
 CACHE_TARGET = 1061001
 CACHE_BASE_MATRIX = 1061002
-CACHE_VALID = 1061003
+CACHE_TIME = 1061003
+CACHE_VALID = 1061004
 
 _EPS = 1.0e-10
+_TIME_EPS = 1.0e-12
 
 
 def get_modata(source):
@@ -161,15 +166,28 @@ def blend_matrix(a, b, t):
     return compose_matrix(pos, rot, scale)
 
 
-def get_or_store_base_matrix(tag, target):
-    # 第一次链接某对象时记录其世界矩阵；重新指定被链接对象时重新记录。
+def get_frame_base_matrix(tag, target):
+    """取得目标对象在当前时间点下、自身动画计算后的世界矩阵。
+
+    同一时间点只记录第一次读取到的矩阵。因为 Python Tag 后面会对 target.SetMg()，
+    如果同一帧因界面刷新等原因再次执行，就不能把上一次写入结果当成新的动画基准。
+    时间发生变化后，Cinema 4D 会先重新计算动画，再在本 Tag 的 Generator 阶段读取。
+    """
     bc = tag.GetDataInstance()
+    now = float(doc.GetTime().Get())
+
     cached_target = bc.GetLink(CACHE_TARGET, doc)
     valid = bc.GetBool(CACHE_VALID)
+    cached_time = bc.GetFloat(CACHE_TIME) if valid else 0.0
 
-    if (not valid) or cached_target != target:
+    if (
+        (not valid)
+        or cached_target != target
+        or abs(cached_time - now) > _TIME_EPS
+    ):
         bc.SetLink(CACHE_TARGET, target)
         bc.SetMatrix(CACHE_BASE_MATRIX, target.GetMg())
+        bc.SetFloat(CACHE_TIME, now)
         bc.SetBool(CACHE_VALID, True)
 
     return bc.GetMatrix(CACHE_BASE_MATRIX)
@@ -191,6 +209,18 @@ def main():
     if target == source:
         return
 
+    blend = max(0.0, min(blend, 1.0))
+
+    # 先取得这一帧目标对象自己动画所产生的世界矩阵。
+    # 这是 0% 的真实基准，而不是“首次链接时”的静态矩阵。
+    base_world_mg = get_frame_base_matrix(op, target)
+
+    # 0% 时显式恢复本帧原始动画矩阵。
+    # 这样即使用户在同一帧从 >0% 拉回 0%，也会立即回到自己的动画位置。
+    if blend <= 0.0:
+        target.SetMg(base_world_mg)
+        return
+
     md = get_modata(source)
     if md is None:
         return
@@ -207,9 +237,6 @@ def main():
     generator = md.GetGenerator()
     generator_mg = generator.GetMg() if isinstance(generator, c4d.BaseObject) else source.GetMg()
     clone_world_mg = generator_mg * local_clone_mg
-
-    base_world_mg = get_or_store_base_matrix(op, target)
-    blend = max(0.0, min(blend, 1.0))
 
     result_mg = blend_matrix(base_world_mg, clone_world_mg, blend)
     target.SetMg(result_mg)
